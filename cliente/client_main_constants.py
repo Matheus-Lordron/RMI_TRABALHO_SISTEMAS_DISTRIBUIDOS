@@ -1,0 +1,10 @@
+COLOR_BG_APP = "#f0f2f5"
+COLOR_BG_CHAT = "#efeae2"
+COLOR_MY_MSG = "#d9fdd3"
+COLOR_OTHER_MSG = "#ffffff"
+COLOR_BTN = "#008069"
+COLOR_BTN_TEXT = "#ffffff"
+FONT_MAIN = ("Segoe UI", 10)
+FONT_BOLD = ("Segoe UI", 10, "bold")
+COLOR_ONLINE = "#21a365"
+COLOR_OFFLINE = "#8e9ba3"
