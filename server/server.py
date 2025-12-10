@@ -1,6 +1,7 @@
 # server/server.py
 import Pyro5.api
 import Pyro5.server
+import Pyro5.errors
 import time
 from database import Database
 from crypto_utils import hash_password, verify_password
@@ -11,6 +12,7 @@ class WhatsUTServer(object):
         self.db = Database()
         self._last_seen = {}
         self._ttl = 90
+        self._callbacks = {}
 
         # Mostrar usuários no startup (debug)
         print("\n===== Usuários registrados no banco =====")
@@ -86,6 +88,12 @@ class WhatsUTServer(object):
         try:
             self.db.save_message(sender_id, receiver_id, content)
             print(f"[SEND] {sender_username} -> {receiver_username}: {content}")
+            cb = self._callbacks.get(receiver_username)
+            if cb:
+                try:
+                    cb.notify_private(sender_username, receiver_username)
+                except Exception as e:
+                    print(f"[SEND] callback receiver erro: {e}")
             return True
         except Exception as e:
             print(f"[SEND] erro ao salvar mensagem: {e}")
@@ -131,6 +139,119 @@ class WhatsUTServer(object):
             res.append((uname, online))
         return res
 
+    def list_groups(self):
+        return self.db.list_groups()
+
+    def list_groups_with_status(self, username):
+        user = self.db.get_user(username)
+        if not user:
+            return []
+        uid = user[0]
+        res = []
+        for gid, name, admin_uname in self.db.list_groups():
+            if admin_uname == username:
+                status = "aprovado"
+            else:
+                st = self.db.membership_status(uid, gid)
+                if st is None:
+                    status = "fora"
+                elif st == 0:
+                    status = "pendente"
+                else:
+                    status = "aprovado"
+            res.append((name, admin_uname, status))
+        return res
+
+    def request_join_group(self, username, group_name):
+        user = self.db.get_user(username)
+        grp = self.db.get_group(group_name)
+        if not user or not grp:
+            return False
+        return self.db.request_join_group(user[0], grp[0])
+
+    def list_pending_requests(self, admin_username, group_name):
+        admin = self.db.get_user(admin_username)
+        grp = self.db.get_group(group_name)
+        if not admin or not grp:
+            return []
+        if grp[2] != admin[0]:
+            return []
+        return [u for (u,) in self.db.list_pending_requests(grp[0])]
+
+    def approve_member(self, admin_username, group_name, member_username):
+        admin = self.db.get_user(admin_username)
+        grp = self.db.get_group(group_name)
+        mem = self.db.get_user(member_username)
+        if not admin or not grp or not mem:
+            return False
+        if grp[2] != admin[0]:
+            return False
+        return self.db.approve_member(mem[0], grp[0])
+
+    def create_group(self, admin_username, group_name):
+        admin = self.db.get_user(admin_username)
+        if not admin:
+            return False
+        return self.db.create_group(group_name, admin[0])
+
+    def add_member_direct(self, admin_username, group_name, member_username):
+        admin = self.db.get_user(admin_username)
+        grp = self.db.get_group(group_name)
+        mem = self.db.get_user(member_username)
+        if not admin or not grp or not mem:
+            return False
+        if grp[2] != admin[0]:
+            return False
+        return self.db.add_member_approved(mem[0], grp[0])
+
+    def delete_group(self, admin_username, group_name):
+        admin = self.db.get_user(admin_username)
+        grp = self.db.get_group(group_name)
+        if not admin or not grp:
+            return False
+        if grp[2] != admin[0]:
+            return False
+        return self.db.delete_group(grp[0])
+
+    def send_group_message(self, sender_username, group_name, content):
+        grp = self.db.get_group(group_name)
+        snd = self.db.get_user(sender_username)
+        if not grp or not snd:
+            return False
+        st = self.db.membership_status(snd[0], grp[0])
+        if st != 1:
+            return False
+        try:
+            self.db.save_group_message(grp[0], snd[0], content)
+            return True
+        except Exception:
+            return False
+
+    def get_group_conversation(self, group_name):
+        grp = self.db.get_group(group_name)
+        if not grp:
+            return []
+        return self.db.get_group_messages(grp[0])
+
+    def register_callback(self, username, cb_uri):
+        try:
+            proxy = Pyro5.api.Proxy(cb_uri)
+            try:
+                proxy._pyroOneway.add("notify_private")
+            except Exception:
+                pass
+            self._callbacks[username] = proxy
+            return True
+        except Exception:
+            return False
+
+    def unregister_callback(self, username):
+        try:
+            self._callbacks.pop(username, None)
+            return True
+        except Exception:
+            return False
+
 
 def start_server():
     daemon = Pyro5.server.Daemon()
@@ -143,8 +264,16 @@ def start_server():
         print("Detalhe:", e)
         return
 
-    uri = daemon.register(WhatsUTServer)
-    ns.register("whatsut.server", uri)
+    obj = WhatsUTServer()
+    uri = daemon.register(obj)
+    try:
+        ns.register("whatsut.server", uri)
+    except Pyro5.errors.NamingError:
+        try:
+            ns.remove("whatsut.server")
+        except Exception:
+            pass
+        ns.register("whatsut.server", uri)
 
     print("🚀 Servidor WhatsUT rodando! URI:", uri)
     daemon.requestLoop()

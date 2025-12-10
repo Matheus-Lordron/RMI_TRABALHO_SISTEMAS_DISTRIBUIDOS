@@ -58,6 +58,18 @@ class Database:
         )
         """)
 
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS group_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            sender INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(group_id) REFERENCES groups(id),
+            FOREIGN KEY(sender) REFERENCES users(id)
+        )
+        """)
+
         self.conn.commit()
 
     # --------- CRUD Usuário ---------
@@ -124,3 +136,141 @@ class Database:
         ORDER BY m.timestamp ASC
         """, (user_a_id, user_b_id, user_b_id, user_a_id))
         return cursor.fetchall()
+
+    def save_group_message(self, group_id, sender_id, content):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO group_messages (group_id, sender, content) VALUES (?, ?, ?)",
+            (group_id, sender_id, content)
+        )
+        self.conn.commit()
+
+    def get_group_messages(self, group_id):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT u.username AS sender_name, gm.content, gm.timestamp
+            FROM group_messages gm
+            JOIN users u ON gm.sender = u.id
+            WHERE gm.group_id = ?
+            ORDER BY gm.timestamp ASC
+            """,
+            (group_id,)
+        )
+        return cursor.fetchall()
+
+    def get_group(self, name):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, name, admin FROM groups WHERE name = ?", (name,))
+        return cursor.fetchone()
+
+    def create_group(self, name, admin_id):
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("INSERT INTO groups (name, admin) VALUES (?, ?)", (name, admin_id))
+            gid = cursor.lastrowid
+            # Admin entra automaticamente como membro aprovado
+            cursor.execute(
+                "INSERT OR REPLACE INTO group_members (user_id, group_id, approved) VALUES (?, ?, 1)",
+                (admin_id, gid)
+            )
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def list_groups(self):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT g.id, g.name, u.username AS admin_username
+            FROM groups g
+            JOIN users u ON g.admin = u.id
+        """)
+        return cursor.fetchall()
+
+    def request_join_group(self, user_id, group_id):
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT OR IGNORE INTO group_members (user_id, group_id, approved) VALUES (?, ?, 0)",
+                (user_id, group_id)
+            )
+            self.conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def approve_member(self, user_id, group_id):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE group_members SET approved = 1 WHERE user_id = ? AND group_id = ?",
+            (user_id, group_id)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def add_member_approved(self, user_id, group_id):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO group_members (user_id, group_id, approved) VALUES (?, ?, 1)",
+            (user_id, group_id)
+        )
+        self.conn.commit()
+        return True
+
+    def membership_status(self, user_id, group_id):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT approved FROM group_members WHERE user_id = ? AND group_id = ?",
+            (user_id, group_id)
+        )
+        row = cursor.fetchone()
+        return None if not row else row[0]
+
+    def list_group_members(self, group_id, approved_only=False):
+        cursor = self.conn.cursor()
+        if approved_only:
+            cursor.execute(
+                """
+                SELECT u.username
+                FROM group_members gm
+                JOIN users u ON gm.user_id = u.id
+                WHERE gm.group_id = ? AND gm.approved = 1
+                """,
+                (group_id,)
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT u.username, gm.approved
+                FROM group_members gm
+                JOIN users u ON gm.user_id = u.id
+                WHERE gm.group_id = ?
+                """,
+                (group_id,)
+            )
+        return cursor.fetchall()
+
+    def list_pending_requests(self, group_id):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT u.username
+            FROM group_members gm
+            JOIN users u ON gm.user_id = u.id
+            WHERE gm.group_id = ? AND gm.approved = 0
+            """,
+            (group_id,)
+        )
+        return cursor.fetchall()
+
+    def delete_group(self, group_id):
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("DELETE FROM group_members WHERE group_id = ?", (group_id,))
+            cursor.execute("DELETE FROM group_messages WHERE group_id = ?", (group_id,))
+            cursor.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+            self.conn.commit()
+            return True
+        except Exception:
+            return False
