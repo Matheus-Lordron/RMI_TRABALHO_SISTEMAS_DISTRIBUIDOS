@@ -5,18 +5,18 @@ import Pyro5.server
 import base64
 import os
 import threading
-from datetime import datetime, timedelta  # <--- ADICIONADO timedelta
+from datetime import datetime, timedelta
 
 # =============================================================================
 # DEFINIÇÃO DO SERVIDOR
 # =============================================================================
 SERVER_NAME = "PYRONAME:whatsut.server"
 
-# Se você tiver o arquivo de constantes, tenta importar
+# Tenta importar constantes extras se existirem (opcional)
 try:
     from client_main_constants import *
 except ImportError:
-    print("Aviso: client_main_constants não encontrado. Usando padrão.")
+    pass
 
 # =============================================================================
 # CONSTANTES VISUAIS (TEMA WHATSAPP)
@@ -121,6 +121,7 @@ class MainChatGUI:
         self.active_chat_target = None  
         self.active_chat_is_group = False
         self.group_admins = {} 
+        self.messages_cache = []  # Cache para evitar piscar a tela
 
         self.master.title(f"WhatsUT | {self.username}")
         self.master.geometry("1100x720")
@@ -135,9 +136,11 @@ class MainChatGUI:
         self.load_users()
         self.load_groups()
         
+        # Threads e Loops
         self.master.after(500, self._presence_loop)
         self.master.after(500, self._start_callback)
-        self.master.after(2000, self._auto_refresh_data)
+        self.master.after(2000, self._auto_refresh_data) # Polling de segurança
+        
         self.master.protocol("WM_DELETE_WINDOW", self._safe_logout)
 
     def _config_styles(self):
@@ -170,7 +173,6 @@ class MainChatGUI:
         self.user_list = tk.Listbox(sidebar, height=6, relief="flat", bg="#f4f4f4", font=("Segoe UI", 10), selectbackground="#d0d0d0", selectforeground="black")
         self.user_list.pack(fill="x", padx=10)
         self.user_list.bind("<Double-Button-1>", lambda e: self.on_contact_select())
-
         ttk.Button(sidebar, text="↻ Atualizar Lista", style="Gray.TButton", command=self.load_users).pack(fill="x", padx=10, pady=5)
 
         tk.Label(sidebar, text="Grupos", bg="white", font=("Segoe UI", 11, "bold"), anchor="w", fg=THEME["primary"]).pack(fill="x", padx=10, pady=(15, 5))
@@ -205,6 +207,9 @@ class MainChatGUI:
     def load_chat_interface(self, target_name, is_group):
         self.active_chat_target = target_name
         self.active_chat_is_group = is_group
+        
+        # Reseta o cache ao trocar de chat
+        self.messages_cache = []
 
         for widget in self.right_frame.winfo_children():
             widget.destroy()
@@ -252,29 +257,20 @@ class MainChatGUI:
         self.canvas_chat.itemconfig(self.canvas_window, width=canvas_width)
 
     # =========================================================================
-    # LÓGICA DE FUSO HORÁRIO (CORREÇÃO BRASÍLIA)
+    # LÓGICA DE FUSO HORÁRIO
     # =========================================================================
     def converter_hora_brasilia(self, timestamp_str):
-        """
-        Converte timestamp UTC do banco para Horário de Brasília (UTC-3).
-        Retorna no formato HH:MM (ex: 20:29).
-        """
         try:
-            # Pega a string até os segundos (descarta milissegundos se houver)
             dt_utc = datetime.strptime(str(timestamp_str).split(".")[0], "%Y-%m-%d %H:%M:%S")
-            # Subtrai 3 horas
             dt_br = dt_utc - timedelta(hours=3)
-            # Retorna formatado
             return dt_br.strftime("%H:%M")
         except Exception:
-            # Se der erro no parse, retorna como string mesmo
             return str(timestamp_str)
 
     # =========================================================================
-    # RENDERIZAÇÃO DE BALÕES (BUBBLES)
+    # RENDERIZAÇÃO DE BALÕES E CACHE
     # =========================================================================
     def add_message_bubble(self, sender, text, timestamp, is_me, is_admin=False):
-        # Cores e alinhamento
         bg_color = THEME["bubble_out"] if is_me else THEME["bubble_in"]
         align = "e" if is_me else "w"
         justify_txt = "right" if is_me else "left"
@@ -292,16 +288,23 @@ class MainChatGUI:
 
         tk.Label(bubble, text=text, font=("Segoe UI", 10), bg=bg_color, fg="black", wraplength=450, justify=justify_txt).pack(anchor="w")
         
-        # AQUI USAMOS A NOVA FUNÇÃO DE CONVERSÃO
         hora_formatada = self.converter_hora_brasilia(timestamp)
         tk.Label(bubble, text=hora_formatada, font=("Segoe UI", 7), bg=bg_color, fg="#777").pack(anchor="e")
+
+    def _render_single_msg(self, data, admin_name):
+        if self.active_chat_is_group:
+            sender, content, ts = data
+        else:
+            sender, receiver, content, ts = data
+        
+        is_me = (sender == self.username)
+        is_admin_msg = (sender == admin_name) if self.active_chat_is_group else False
+
+        self.add_message_bubble(sender, content, ts, is_me, is_admin_msg)
 
     def _load_conversation_data(self):
         if not self.active_chat_target: return
         
-        for w in self.msg_frame.winfo_children():
-            w.destroy()
-
         try:
             msgs = []
             admin_name = ""
@@ -312,18 +315,31 @@ class MainChatGUI:
             else:
                 msgs = self.server.get_conversation(self.username, self.active_chat_target)
 
-            for data in msgs:
-                if self.active_chat_is_group:
-                    sender, content, ts = data
-                    receiver = None
-                else:
-                    sender, receiver, content, ts = data
+            # LÓGICA ANTI-PISCAR
+            # 1. Se nada mudou, não faz nada
+            if msgs == self.messages_cache:
+                return
+
+            # 2. Se apenas chegaram novas mensagens (append)
+            len_cache = len(self.messages_cache)
+            if len(msgs) > len_cache and msgs[:len_cache] == self.messages_cache:
+                novas_msgs = msgs[len_cache:]
+                for data in novas_msgs:
+                    self._render_single_msg(data, admin_name)
                 
-                is_me = (sender == self.username)
-                is_admin_msg = (sender == admin_name) if self.active_chat_is_group else False
+                self.messages_cache = msgs
+                self.msg_frame.update_idletasks()
+                self.canvas_chat.yview_moveto(1.0)
+                return
 
-                self.add_message_bubble(sender, content, ts, is_me, is_admin_msg)
+            # 3. Se houve mudança drástica (delete, ou inicio), redesenha tudo
+            for w in self.msg_frame.winfo_children():
+                w.destroy()
 
+            for data in msgs:
+                self._render_single_msg(data, admin_name)
+
+            self.messages_cache = msgs
             self.msg_frame.update_idletasks()
             self.canvas_chat.yview_moveto(1.0)
 
@@ -331,11 +347,16 @@ class MainChatGUI:
             print(f"Erro ao carregar chat: {e}")
 
     # =========================================================================
-    # LÓGICA DO SERVIDOR
+    # LÓGICA DO SERVIDOR + POLLING
     # =========================================================================
 
     def _auto_refresh_data(self):
-        # Lógica de refresh
+        if self.active_chat_target:
+             try:
+                 # Recarrega silenciosamente
+                 self._load_conversation_data()
+             except Exception:
+                 pass
         self.master.after(2000, self._auto_refresh_data)
 
     def send_message_current(self):
@@ -536,14 +557,18 @@ class MainChatGUI:
             def __init__(self, gui): self.gui = gui
             @Pyro5.server.expose
             def notify_private(self, sender, receiver):
+                # Se a janela ativa é com quem enviou ou recebeu
                 if self.gui.active_chat_target in [sender, receiver]:
                     self.gui.master.after(0, self.gui._load_conversation_data)
                 elif self.gui.active_chat_is_group and receiver == self.gui.active_chat_target:
                     self.gui.master.after(0, self.gui._load_conversation_data)
+
             @Pyro5.server.expose
             def notify_file(self, s, r, f):
                 self.notify_private(s, r)
-        self._daemon = Pyro5.server.Daemon()
+        
+        # host="" garante que o daemon escute conexões de fora (rede)
+        self._daemon = Pyro5.server.Daemon(host="") 
         self._cb = ClientCallback(self)
         self._uri = self._daemon.register(self._cb)
         threading.Thread(target=self._daemon.requestLoop, daemon=True).start()
